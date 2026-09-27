@@ -8013,6 +8013,50 @@ public:
 
 		return clamp_smax(v);
 	}
+	
+	// Clamp to 1-4th XFLT_MAX (SNaN is undefined)
+	value_t<f32[4]> clamp_quarter_xmax(value_t<f32[4]> v)
+	{
+#ifdef ARCH_X64
+		if (m_use_avx512)
+		{
+			return eval(vrangeps(v, fsplat<f32[4]>(std::bit_cast<f32, u32>(0x7effffff)), 0x2 /*minMag, 1st's sign*/, 0xff));
+		}
+#endif
+
+		const auto pos_clamp = bitcast<f32[4]>(min(bitcast<s32[4]>(v), splat<s32[4]>(0x7effffff)));
+		return eval(bitcast<f32[4]>(min(bitcast<u32[4]>(pos_clamp), splat<u32[4]>(0xfeffffff))));
+	}
+
+	// Clamp to double IEEE FLT_MAX (SNaN is undefined)
+	value_t<f32[4]> clamp_double_fltmin(value_t<f32[4]> v)
+	{
+#ifdef ARCH_X64
+		if (m_use_avx512)
+		{
+			return eval(vrangeps(eval(v), fsplat<f32[4]>(std::bit_cast<f32, u32>(2 << 23)), 0x3 /*maxMag, 1st's sign*/, 0xff));
+		}
+#endif
+
+		const auto pos_clamp = bitcast<f32[4]>(max(bitcast<u32[4]>(v), splat<u32[4]>(0x01000000)));
+		return eval(bitcast<f32[4]>(max(bitcast<s32[4]>(pos_clamp), splat<s32[4]>(0x81000000))));
+	}
+
+	// (op1 == 0.0f)? +0.0f : op2
+	template <typename T, typename U>
+	value_t<f32[4]> conditionally_clear_if_zero(T zero_check, U v)
+	{
+#ifdef ARCH_X64
+		if (m_use_avx512)
+		{
+			// 0/denormal => +0.0, else => src1
+			return vfixupimmps(eval(v), eval(zero_check), splat<u32[4]>(0x00000800), 0, 0xff);
+		}
+#endif
+
+		const auto zero_cmp = sext<s32[4]>((bitcast<u32[4]>(zero_check) & (0xff << 23)) != 0);
+		return eval(bitcast<f32[4]>(zero_cmp & bitcast<s32[4]>(v)));
+	}
 
 	template <typename T>
 	static llvm_calli<f32[4], T> frest(T&& a)
@@ -8240,7 +8284,7 @@ public:
 				return eval(sext<s32[4]>(mai > mbi));
 			}
 
-			if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::approximate)
+			if (g_cfg.core.spu_xfloat_accuracy != xfloat_accuracy::relaxed)
 			{
 				return eval(sext<s32[4]>(fcmp_uno(ma > mb) & (mai > mbi)));
 			}
@@ -8267,6 +8311,24 @@ public:
 			return;
 		}
 
+		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::extended)
+		{
+			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+
+			const auto ah = bitcast<u32[4]>(a) - (1 << 23);
+			const auto bh = bitcast<u32[4]>(b) - (1 << 23);
+
+			const auto a_correct = conditionally_clear_if_zero(a, bitcast<f32[4]>(ah));
+			const auto b_correct = conditionally_clear_if_zero(b, bitcast<f32[4]>(bh));
+
+			const auto hsum = a_correct + b_correct;
+
+			const auto clamp_adj = bitcast<u32[4]>(clamp_smax(eval(hsum))) + (1 << 23);
+
+			set_vr(op.rt, conditionally_clear_if_zero(bitcast<f32[4]>(hsum), bitcast<f32[4]>(clamp_adj)));
+			return;
+		}
+
 		register_intrinsic("spu_fa", [&](llvm::CallInst* ci)
 		{
 			const auto a = value<f32[4]>(ci->getOperand(0));
@@ -8283,6 +8345,24 @@ public:
 		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate)
 		{
 			set_vr(op.rt, get_vr<f64[4]>(op.ra) - get_vr<f64[4]>(op.rb));
+			return;
+		}
+
+		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::extended)
+		{
+			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+
+			const auto ah = bitcast<u32[4]>(a) - (1 << 23);
+			const auto bh = bitcast<u32[4]>(b) - (1 << 23);
+
+			const auto a_correct = conditionally_clear_if_zero(a, bitcast<f32[4]>(ah));
+			const auto b_correct = conditionally_clear_if_zero(b, bitcast<f32[4]>(bh));
+
+			const auto hdiff = a_correct - b_correct;
+
+			const auto clamp_adj = bitcast<u32[4]>(clamp_smax(eval(hdiff))) + (1 << 23);
+
+			set_vr(op.rt, conditionally_clear_if_zero(hdiff, bitcast<f32[4]>(clamp_adj)));
 			return;
 		}
 
@@ -8313,6 +8393,26 @@ public:
 		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::accurate)
 		{
 			set_vr(op.rt, get_vr<f64[4]>(op.ra) * get_vr<f64[4]>(op.rb));
+			return;
+		}
+
+		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::extended)
+		{
+			const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
+
+			// NOTE: If a denormal was created, the multiply will zero it...
+			const auto ah = bitcast<u32[4]>(a) - (1 << 23);
+			const auto bh = bitcast<u32[4]>(b) - (1 << 23);
+
+			const auto a_correct = conditionally_clear_if_zero(a, bitcast<f32[4]>(ah));
+			const auto b_correct = conditionally_clear_if_zero(b, bitcast<f32[4]>(bh));
+
+			const auto mul = a_correct * b_correct;
+
+			const auto clamp = clamp_quarter_xmax(eval(mul));
+			const auto clamp_adj = bitcast<f32[4]>(bitcast<u32[4]>(clamp) + (2 << 23));
+
+			set_vr(op.rt, conditionally_clear_if_zero(mul, clamp_adj));
 			return;
 		}
 
@@ -8500,7 +8600,7 @@ public:
 				return eval(sext<s32[4]>(bitcast<s32[4]>(a) == bitcast<s32[4]>(b)));
 			}
 
-			if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::approximate)
+			if (g_cfg.core.spu_xfloat_accuracy != xfloat_accuracy::relaxed)
 			{
 				return eval(sext<s32[4]>(fcmp_ord(a == b)) | sext<s32[4]>(bitcast<s32[4]>(a) == bitcast<s32[4]>(b)));
 			}
@@ -8552,7 +8652,7 @@ public:
 				return eval(sext<s32[4]>(bitcast<s32[4]>(fa) == bitcast<s32[4]>(fb)));
 			}
 
-			if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::approximate)
+			if (g_cfg.core.spu_xfloat_accuracy != xfloat_accuracy::relaxed)
 			{
 				return eval(sext<s32[4]>(fcmp_ord(fa == fb)) | sext<s32[4]>(bitcast<s32[4]>(fa) == bitcast<s32[4]>(fb)));
 			}
@@ -8619,6 +8719,28 @@ public:
 			return;
 		}
 
+		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::extended)
+		{
+			const auto [a, b, c] = get_vrs<f32[4]>(op.ra, op.rb, op.rc);
+
+			const auto ah = bitcast<u32[4]>(a) - (1 << 23);
+			const auto bh = bitcast<u32[4]>(b) - (1 << 23);
+
+			const auto a_correct = conditionally_clear_if_zero(a, bitcast<f32[4]>(ah));
+			const auto b_correct = conditionally_clear_if_zero(b, bitcast<f32[4]>(bh));
+
+			const auto c_thres = clamp_double_fltmin(c);
+			const auto c_correct = bitcast<f32[4]>(bitcast<u32[4]>(c_thres) - (2 << 23));
+
+			const auto fma = fma32x4(eval(-a_correct), b_correct, eval(c_correct));
+
+			const auto clamp = clamp_quarter_xmax(eval(fma));
+			const auto clamp_adj = bitcast<f32[4]>(bitcast<u32[4]>(clamp) + (2 << 23));
+
+			set_vr(op.rt4, conditionally_clear_if_zero(fma, clamp_adj));
+			return;
+		}
+
 		register_intrinsic("spu_fnms", [&](llvm::CallInst* ci)
 		{
 			const auto a = value<f32[4]>(ci->getOperand(0));
@@ -8661,6 +8783,28 @@ public:
 			return;
 		}
 
+		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::extended)
+		{
+			const auto [a, b, c] = get_vrs<f32[4]>(op.ra, op.rb, op.rc);
+
+			// NOTE: If a denormal was created, the multiply will zero it...
+			const auto ah = bitcast<u32[4]>(a) - (1 << 23);
+			const auto bh = bitcast<u32[4]>(b) - (1 << 23);
+
+			const auto a_correct = conditionally_clear_if_zero(a, bitcast<f32[4]>(ah));
+			const auto b_correct = conditionally_clear_if_zero(b, bitcast<f32[4]>(bh));
+
+			// NOTE: This might quiet SNaN, increasing the xfloat's value
+			const auto c_correct = bitcast<f32[4]>(bitcast<u32[4]>(clamp_double_fltmin(c)) - (2 << 23));
+
+			const auto fma = fma32x4(a_correct, b_correct, eval(c_correct));
+
+			const auto clamp = clamp_quarter_xmax(eval(fma));
+			const auto clamp_adj = bitcast<f32[4]>(bitcast<u32[4]>(clamp) + (2 << 23));
+
+			set_vr(op.rt4, conditionally_clear_if_zero(fma, clamp_adj));
+			return;
+		}
 		
 		register_intrinsic("spu_fma", [&](llvm::CallInst* ci)
 		{
@@ -8978,6 +9122,27 @@ public:
 			return;
 		}
 
+		if (g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::extended)
+		{
+			const auto [a, b, c] = get_vrs<f32[4]>(op.ra, op.rb, op.rc);
+
+			const auto ah = bitcast<u32[4]>(a) - (1 << 23);
+			const auto bh = bitcast<u32[4]>(b) - (1 << 23);
+
+			const auto a_correct = conditionally_clear_if_zero(a, bitcast<f32[4]>(ah));
+			const auto b_correct = conditionally_clear_if_zero(b, bitcast<f32[4]>(bh));
+
+			const auto c_correct = bitcast<f32[4]>(bitcast<u32[4]>(clamp_double_fltmin(c)) - (2 << 23));
+
+			const auto fma = fma32x4(a_correct, b_correct, eval(-c_correct));
+
+			const auto clamp = clamp_quarter_xmax(eval(fma));
+			const auto clamp_adj = bitcast<f32[4]>(bitcast<u32[4]>(clamp) + (2 << 23));
+
+			set_vr(op.rt4, conditionally_clear_if_zero(fma, clamp_adj));
+			return;
+		}
+
 		register_intrinsic("spu_fms", [&](llvm::CallInst* ci)
 		{
 			const auto a = value<f32[4]>(ci->getOperand(0));
@@ -9064,8 +9229,9 @@ public:
 		switch (g_cfg.core.spu_xfloat_accuracy)
 		{
 		case xfloat_accuracy::approximate:
+		case xfloat_accuracy::extended:
 		{
-			// For approximate, create a pattern but do not optimize yet
+			// Create a pattern but do not optimize yet
 			register_intrinsic("spu_re", [&](llvm::CallInst* ci)
 			{
 				const auto a = bitcast<u32[4]>(value<f32[4]>(ci->getOperand(0)));
@@ -9159,7 +9325,7 @@ public:
 		}
 
 		// Do not pattern match for accurate
-		if(g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::approximate || g_cfg.core.spu_xfloat_accuracy == xfloat_accuracy::relaxed)
+		if(g_cfg.core.spu_xfloat_accuracy != xfloat_accuracy::accurate)
 		{
 			if (const auto [ok, mb] = match_expr(b, frest(match<f32[4]>())); ok && mb.eq(a))
 			{
