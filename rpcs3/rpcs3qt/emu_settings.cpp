@@ -1511,6 +1511,7 @@ QString emu_settings::GetLocalizedSetting(const QString& original, emu_settings_
 		switch (static_cast<xfloat_accuracy>(index))
 		{
 		case xfloat_accuracy::accurate: return tr("Accurate XFloat");
+		case xfloat_accuracy::extended: return tr("Extended XFloat");
 		case xfloat_accuracy::approximate: return tr("Approximate XFloat");
 		case xfloat_accuracy::relaxed: return tr("Relaxed XFloat");
 		case xfloat_accuracy::inaccurate: return tr("Inaccurate XFloat");

@@ -729,6 +729,7 @@ void fmt_class_string<xfloat_accuracy>::format(std::string& out, u64 arg)
 		switch (value)
 		{
 		case xfloat_accuracy::accurate: return "Accurate";
+		case xfloat_accuracy::extended: return "Extended";
 		case xfloat_accuracy::approximate: return "Approximate";
 		case xfloat_accuracy::relaxed: return "Relaxed";
 		case xfloat_accuracy::inaccurate: return "Inaccurate";

@@ -375,6 +375,7 @@ enum class stereo_render_mode_options
 enum class xfloat_accuracy
 {
 	accurate,
+	extended,
 	approximate,
 	relaxed, // Approximate accuracy for only the "FCGT", "FNMS", "FREST" AND "FRSQEST" instructions
 	inaccurate
