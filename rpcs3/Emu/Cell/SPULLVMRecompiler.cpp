@@ -8043,18 +8043,33 @@ public:
 	}
 
 	// (op1 == 0.0f)? +0.0f : op2
-	template <typename T, typename U>
-	value_t<f32[4]> conditionally_clear_if_zero(T zero_check, U v)
+	template <typename T, typename N>
+	value_t<f32[4]> conditionally_clear_if_zero(T check_zero, N v, std::optional<llvm::KnownFPClass> known_opt = std::nullopt)
 	{
+		const auto known = known_opt.value_or(get_known_fp_class<3>(check_zero, spu_zero_fp_classes));
+
+		if (known.isKnownNever(spu_zero_fp_classes))
+			return eval(v);
+
+		if (known.isKnownAlways(spu_zero_fp_classes))
+			return eval(fsplat<f32[4]>(0.));
+
 #ifdef ARCH_X64
 		if (m_use_avx512)
 		{
 			// 0/denormal => +0.0, else => src1
-			return vfixupimmps(eval(v), eval(zero_check), splat<u32[4]>(0x00000800), 0, 0xff);
+			return vfixupimmps(eval(v), eval(check_zero), splat<u32[4]>(0x00000800u), 0, 0xff);
+		}
+
+		if (m_use_ssse3)
+		{
+			// sign(x, 0) => 0
+			const auto exp_only = bitcast<s32[4]>(check_zero) & (0xff << 23);
+			return eval(bitcast<f32[4]>(psignd(bitcast<s32[4]>(v), exp_only)));
 		}
 #endif
 
-		const auto zero_cmp = sext<s32[4]>((bitcast<u32[4]>(zero_check) & (0xff << 23)) != 0);
+		const auto zero_cmp = sext<s32[4]>((bitcast<u32[4]>(check_zero) & (0xff << 23)) != 0);
 		return eval(bitcast<f32[4]>(zero_cmp & bitcast<s32[4]>(v)));
 	}
 
@@ -8322,6 +8337,14 @@ public:
 			const auto b_correct = conditionally_clear_if_zero(b, bitcast<f32[4]>(bh));
 
 			const auto hsum = a_correct + b_correct;
+			
+			if (m_use_avx512)
+			{
+				// 0/denormal => FLT_MIN, +-INF => copysign(FLT_MAX, src2), else src2
+				const auto hfixup = vfixupimmps(fsplat<f32[4]>(-INFINITY), hsum, splat<u32[4]>(0x11ef1011u), 0, 0xff);
+				set_vr(op.rt, bitcast<f32[4]>(bitcast<u32[4]>(hfixup) + (1 << 23)));
+				return;
+			}
 
 			const auto clamp_adj = bitcast<u32[4]>(clamp_smax(eval(hsum))) + (1 << 23);
 
@@ -8359,6 +8382,14 @@ public:
 			const auto b_correct = conditionally_clear_if_zero(b, bitcast<f32[4]>(bh));
 
 			const auto hdiff = a_correct - b_correct;
+			
+			if (m_use_avx512)
+			{
+				// 0/denormal => -INF, +-INF => copysign(FLT_MAX, src2), else src2
+				const auto hfixup = vfixupimmps(fsplat<f32[4]>(-INFINITY), hdiff, splat<u32[4]>(0x11ef1011u), 0, 0xff);
+				set_vr(op.rt, bitcast<f32[4]>(bitcast<u32[4]>(hfixup) + (1 << 23)));
+				return;
+			}
 
 			const auto clamp_adj = bitcast<u32[4]>(clamp_smax(eval(hdiff))) + (1 << 23);
 
