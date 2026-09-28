@@ -3896,6 +3896,29 @@ public:
 			{data0, m_ir->CreateBitCast(data1, get_type<u8[16]>()), m_ir->CreateBitCast(data2, get_type<u8[16]>())});
 		return result;
 	}
+	
+	template <typename T1, typename T2>
+	GNUC_X64_TARGET("ssse3") value_t<s32[4]> psignd(T1 a, T2 b)
+	{
+		value_t<s32[4]> result;
+
+		const auto data0 = a.eval(m_ir);
+		const auto data1 = b.eval(m_ir);
+
+#if defined(ARCH_X64)
+		const auto [a_is_const, a_data] = get_const_vector(data0, -1);
+		const auto [b_is_const, b_data] = get_const_vector(data1, -1);
+
+		if (a_is_const && b_is_const)
+		{
+			const v128 psign = _mm_sign_epi32(a_data, b_data);
+			result.value = llvm::ConstantDataVector::get(m_context, llvm::ArrayRef(psign._u32.m_data, 4));
+			return result;
+		}
+#endif
+		result.value = m_ir->CreateCall(get_intrinsic(llvm::Intrinsic::x86_ssse3_psign_d_128), { data0, data1 });
+		return result;
+	}
 
 #ifdef ARCH_ARM64
 template <typename T1, typename T2, typename T3>
