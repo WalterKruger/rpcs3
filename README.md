@@ -1,3 +1,12 @@
+Purpose of this fork
+=====
+
+This was created to test a custom SPU xfloat accuracy mode called `extended`. It emulates the extended xfloat range well having the tradeoff of prematurely zeroing values in the near denormal range. In theory it should be a middle ground between "approximate" and "accurate" in terms of correctness. During testing it appears to work in most scenarios where "accurate" is required well being substantially faster.
+
+*(Below is the upstream README)*
+
+***
+
 RPCS3
 =====
 
