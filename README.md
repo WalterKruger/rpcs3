@@ -1,3 +1,19 @@
+# Purpose of fork
+
+Adds an experimental SPU xfloat accuracy mode called `extended`. It emulates the extended xfloat range with single precision floats by sacrificing values in the near denormals (which are prematurely zeroed). 
+It is intended to acts as a more performant replacement for "accurate".
+
+It has been verified to work with the following games (which otherwise require `accurate`):
+
+- InFamous 1
+- GTA IV *(Briefly)*
+- Metro: Last Light *(Briefly)*
+
+***
+***
+
+*(Upstream description below)*
+
 RPCS3
 =====
 
